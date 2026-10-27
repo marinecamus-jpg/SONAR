@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#0b1016">
+<title>Sentinelle Doppler</title>
+<style>
+/* Panneau d'instrument : fond sombre fixe pour une salle d'endoscopie, une seule couleur d'alerte. */
+:root{
+  color-scheme: dark;
+  --bg:#0b1016; --panel:#141c26; --line:#243243;
+  --fg:#e8eef5; --muted:#8fa3b8;
+  --signal:#2ee6a8; --warn:#ffb648; --idle:#3d4e63;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--fg); font:16px/1.45 var(--sans);
+  -webkit-text-size-adjust:100%; overflow-x:hidden;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+  transition:background .12s linear;
+}
+body.alert{background:#06251c}
+.wrap{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px;padding-block:14px}
+
+h1{font:600 15px/1.2 var(--sans);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0}
+
+/* Bandeau d'état : la seule chose lisible à deux mètres */
+.status{
+  border-radius:18px;background:var(--panel);border:1px solid var(--line);
+  padding:22px 18px;display:flex;flex-direction:column;align-items:center;gap:6px;
+  transition:background .12s linear,border-color .12s linear;
+}
+.status.on{background:#0f3a2d;border-color:var(--signal)}
+.verdict{font:700 30px/1.05 var(--sans);letter-spacing:-.01em;text-align:center;text-wrap:balance}
+.status.on .verdict{color:var(--signal)}
+.status.off .verdict{color:var(--muted)}
+.bpm{font:600 56px/1 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+.bpm small{font:500 14px/1 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);display:block;margin-top:6px}
+.pulse{width:14px;height:14px;border-radius:50%;background:var(--idle);margin-top:4px}
+.pulse.beat{background:var(--signal);box-shadow:0 0 18px var(--signal)}
+
+/* Confiance */
+.meter{width:100%;height:10px;border-radius:5px;background:#0a121b;overflow:hidden;border:1px solid var(--line)}
+.meter i{display:block;height:100%;width:0%;background:var(--warn);transition:width .15s linear}
+.meter i.ok{background:var(--signal)}
+.meterRow{display:flex;align-items:center;gap:10px;width:100%}
+.meterRow span{font:500 11px/1 var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+
+canvas{width:100%;height:110px;display:block;border-radius:14px;background:var(--panel);border:1px solid var(--line)}
+
+.controls{display:flex;flex-wrap:wrap;gap:10px}
+button{
+  flex:1 1 140px;min-width:0;font:600 16px/1 var(--sans);color:var(--fg);
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 14px;cursor:pointer;
+}
+button.primary{background:var(--signal);border-color:var(--signal);color:#06241b}
+button[aria-pressed="true"]{border-color:var(--signal);color:var(--signal)}
+button:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:7px 0}
+.row+.row{border-top:1px solid var(--line)}
+.row label{font-size:14px;color:var(--muted)}
+.row b{font:600 15px/1 var(--mono);font-variant-numeric:tabular-nums}
+input[type=range]{width:150px;accent-color:var(--signal)}
+details summary{cursor:pointer;color:var(--muted);font-size:14px;letter-spacing:.02em}
+details[open] summary{margin-bottom:10px}
+.note{font-size:13px;line-height:1.5;color:var(--muted)}
+.note b{color:var(--fg);font-weight:600}
+.disclaimer{border:1px solid var(--warn);border-radius:12px;padding:11px 13px;font-size:12.5px;line-height:1.45;color:var(--warn)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Sentinelle Doppler</h1>
+
+  <div class="status off" id="status">
+    <div class="verdict" id="verdict">Micro à l'arrêt</div>
+    <div class="bpm" id="bpm">--<small>battements / min</small></div>
+    <div class="pulse" id="pulse"></div>
+    <div class="meterRow">
+      <span>Confiance</span>
+      <div class="meter"><i id="conf"></i></div>
+    </div>
+  </div>
+
+  <canvas id="trace" width="1120" height="220" aria-label="Enveloppe du son dans la bande Doppler"></canvas>
+
+  <div class="controls">
+    <button id="start" class="primary">Démarrer l'écoute</button>
+    <button id="sound" aria-pressed="false">Bip : non</button>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label for="sens">Sensibilité</label>
+      <input type="range" id="sens" min="0" max="100" value="50">
+    </div>
+    <div class="row"><label>Niveau dans la bande</label><b id="lvl">--</b></div>
+    <div class="row"><label>Périodicité</label><b id="score">--</b></div>
+    <div class="row"><label>Profondeur de modulation</label><b id="depth">--</b></div>
+  </div>
+
+  <details class="card">
+    <summary>Réglages et mode d'emploi</summary>
+    <div class="row">
+      <label for="band">Bande analysée</label>
+      <select id="band" style="background:#0a121b;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px">
+        <option value="400,2500" selected>400 – 2500 Hz</option>
+        <option value="300,3500">300 – 3500 Hz (large)</option>
+        <option value="600,1800">600 – 1800 Hz (étroite)</option>
+      </select>
+    </div>
+    <p class="note" style="margin:12px 0 0">
+      <b>Pose.</b> Téléphone à plat à 20–40 cm du haut-parleur du Doppler, micro dégagé, pas sous un champ.<br>
+      <b>Lecture.</b> La courbe montre le volume dans la bande, débarrassé du fond constant. Un flux donne des bosses régulières ; le bruit seul donne une ligne plate et hachée.<br>
+      <b>Sensibilité.</b> À gauche, l'alerte est rare et sûre. À droite, elle part plus vite et peut se tromper. Le réglage médian a été calé sur vos deux enregistrements de référence.<br>
+      <b>Bip.</b> Le tic est émis à 3300 Hz, en dehors de la bande analysée, pour ne pas se détecter lui-même.
+    </p>
+  </details>
+
+  <p class="disclaimer">Prototype de recherche. Aucune valeur diagnostique : l'alerte ne remplace ni l'écoute de l'opérateur ni la lecture du Doppler, et son absence ne signifie pas qu'il n'y a pas de vaisseau.</p>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ---------- Paramètres de détection (calés sur IMG_8937 et IMG_4467) ---------- */
+const GRID_HZ   = 50;    // grille temporelle uniforme de l'enveloppe
+const WIN_S     = 4.5;   // fenêtre d'analyse
+const SMOOTH_S  = 0.10;  // lissage de l'enveloppe
+const DETREND_S = 1.6;   // retrait de la dérive lente
+const LAG_MIN   = 0.30, LAG_MAX = 1.50;   // 40 à 200 bpm
+const ANALYSE_MS= 200;   // cadence d'analyse
+const HOLD_MS   = 1600;  // maintien de l'alerte après la dernière confirmation
+const NEED_OK   = 3;     // confirmations consécutives
+const BPM_TOL   = 0.18;  // écart de rythme toléré entre confirmations
+
+let band=[400,2500], scoreTh=0.32, depthTh=1.3;
+
+/* ---------- DOM ---------- */
+const $=id=>document.getElementById(id);
+const elStatus=$("status"), elVerdict=$("verdict"), elBpm=$("bpm"), elPulse=$("pulse"),
+      elConf=$("conf"), elLvl=$("lvl"), elScore=$("score"), elDepth=$("depth"),
+      elStart=$("start"), elSound=$("sound"), elSens=$("sens"), elBand=$("band"),
+      cv=$("trace"), ctx2d=cv.getContext("2d");
+
+/* ---------- État ---------- */
+let audioCtx=null, analyser=null, stream=null, freq=null;
+let running=false, beepOn=false, wakeLock=null;
+const samples=[];                 // {t (s), v (dB)}
+let lastOk=[], alertUntil=0, lastBpm=0, lastBeat=0, raf=0, timer=0;
+
+/* ---------- Micro ---------- */
+async function start(){
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:{
+      echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1
+    }});
+  }catch(e){
+    elVerdict.textContent="Micro refusé";
+    elStatus.className="status off";
+    alert("Le micro n'a pas démarré. Autorisez le micro pour cette page, et ouvrez-la en https (pas en fichier local).");
+    return;
+  }
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  await audioCtx.resume();
+  analyser=audioCtx.createAnalyser();
+  analyser.fftSize=2048;
+  analyser.smoothingTimeConstant=0;
+  audioCtx.createMediaStreamSource(stream).connect(analyser);
+  freq=new Float32Array(analyser.frequencyBinCount);
+
+  running=true;
+  elStart.textContent="Arrêter";
+  elStart.classList.remove("primary");
+  elVerdict.textContent="À l'écoute";
+  samples.length=0; lastOk=[];
+  raf=requestAnimationFrame(tick);
+  timer=setInterval(analyse,ANALYSE_MS);
+  keepAwake();
+}
+
+function stop(){
+  running=false;
+  cancelAnimationFrame(raf); clearInterval(timer);
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  if(audioCtx) audioCtx.close();
+  audioCtx=null; stream=null;
+  elStart.textContent="Démarrer l'écoute";
+  elStart.classList.add("primary");
+  setAlert(false);
+  elVerdict.textContent="Micro à l'arrêt";
+  elBpm.innerHTML='--<small>battements / min</small>';
+  elConf.style.width="0%";
+  if(wakeLock){ wakeLock.release().catch(()=>{}); wakeLock=null; }
+}
+
+async function keepAwake(){
+  try{ if("wakeLock" in navigator) wakeLock=await navigator.wakeLock.request("screen"); }catch(e){}
+}
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"&&running) keepAwake(); });
+
+/* ---------- Mesure du niveau dans la bande, à chaque image ---------- */
+function tick(){
+  if(!running) return;
+  analyser.getFloatFrequencyData(freq);            // dB par bin
+  const nyq=audioCtx.sampleRate/2, binHz=nyq/freq.length;
+  let sum=0, n=0;
+  const i0=Math.max(1,Math.floor(band[0]/binHz)), i1=Math.min(freq.length-1,Math.ceil(band[1]/binHz));
+  for(let i=i0;i<=i1;i++){ const d=freq[i]; if(d>-200){ sum+=Math.pow(10,d/10); n++; } }
+  if(n){
+    const v=10*Math.log10(sum/n+1e-15);
+    samples.push({t:audioCtx.currentTime, v:v});
+    const cut=audioCtx.currentTime-(WIN_S+1.5);
+    while(samples.length && samples[0].t<cut) samples.shift();
+    elLvl.textContent=v.toFixed(1)+" dB";
+  }
+  draw();
+  raf=requestAnimationFrame(tick);
+}
+
+/* ---------- Analyse : enveloppe -> autocorrélation -> rythme ---------- */
+function uniformGrid(){
+  if(samples.length<10) return null;
+  const tEnd=samples[samples.length-1].t, tStart=tEnd-WIN_S;
+  if(samples[0].t>tStart+0.3) return null;
+  const N=Math.round(WIN_S*GRID_HZ), out=new Float64Array(N);
+  let j=0;
+  for(let k=0;k<N;k++){
+    const t=tStart+k/GRID_HZ;
+    while(j<samples.length-2 && samples[j+1].t<t) j++;
+    const a=samples[j], b=samples[Math.min(j+1,samples.length-1)];
+    const w=(b.t>a.t)?(t-a.t)/(b.t-a.t):0;
+    out[k]=a.v+(b.v-a.v)*Math.max(0,Math.min(1,w));
+  }
+  return out;
+}
+function movingAverage(x,k){
+  const N=x.length, out=new Float64Array(N), half=Math.floor(k/2);
+  let sum=0, lo=0, hi=-1;
+  for(let i=0;i<N;i++){
+    const a=Math.max(0,i-half), b=Math.min(N-1,i+half);
+    while(hi<b){ hi++; sum+=x[hi]; }
+    while(lo<a){ sum-=x[lo]; lo++; }
+    out[i]=sum/(hi-lo+1);
+  }
+  return out;
+}
+function percentile(arr,p){
+  const s=Array.from(arr).sort((a,b)=>a-b);
+  return s[Math.min(s.length-1,Math.max(0,Math.round(p*(s.length-1))))];
+}
+
+function analyse(){
+  const g=uniformGrid();
+  if(!g) return;
+  const sm=movingAverage(g,Math.max(1,Math.round(SMOOTH_S*GRID_HZ)));
+  const D=Math.max(1,Math.round(DETREND_S*GRID_HZ));
+  const trend=movingAverage(sm,D);
+  const cut=Math.floor(D/2);
+  const d=[];
+  for(let i=cut;i<sm.length-cut;i++) d.push(sm[i]-trend[i]);
+  if(d.length<Math.round(2.4*GRID_HZ)) return;
+  let mean=0; for(const v of d) mean+=v; mean/=d.length;
+  for(let i=0;i<d.length;i++) d[i]-=mean;
+
+  const maxLag=Math.min(d.length-1,Math.round(LAG_MAX*GRID_HZ));
+  const minLag=Math.round(LAG_MIN*GRID_HZ);
+  let r0=0; for(const v of d) r0+=v*v; r0/=d.length;
+  if(r0<=1e-9) return;
+  let best=0, bestLag=0;
+  for(let L=minLag;L<=maxLag;L++){
+    let s=0; for(let i=0;i+L<d.length;i++) s+=d[i]*d[i+L];
+    const r=(s/(d.length-L))/r0;                       // estimateur non biaisé
+    if(r>best){ best=r; bestLag=L; }
+  }
+  const depth=percentile(d,0.90)-percentile(d,0.20);
+  const bpm=bestLag?60/(bestLag/GRID_HZ):0;
+
+  elScore.textContent=best.toFixed(2);
+  elDepth.textContent=depth.toFixed(1)+" dB";
+  const conf=Math.max(0,Math.min(1,0.5*(best/scoreTh)+0.5*(depth/depthTh)-0.5));
+  elConf.style.width=Math.round(conf*100)+"%";
+  elConf.classList.toggle("ok",conf>0.75);
+
+  const ok=best>scoreTh && depth>depthTh && bpm>=40 && bpm<=200;
+  lastOk.push(ok?bpm:0);
+  if(lastOk.length>NEED_OK) lastOk.shift();
+
+  if(lastOk.length===NEED_OK && lastOk.every(v=>v>0)){
+    const mn=Math.min(...lastOk), mx=Math.max(...lastOk), av=lastOk.reduce((a,b)=>a+b)/NEED_OK;
+    if((mx-mn)/av<BPM_TOL){
+      lastBpm=Math.round(av);
+      alertUntil=performance.now()+HOLD_MS;
+    }
+  }
+  const on=performance.now()<alertUntil;
+  setAlert(on);
+  if(on) elBpm.innerHTML=lastBpm+'<small>battements / min</small>';
+}
+
+function setAlert(on){
+  elStatus.className="status "+(on?"on":"off");
+  document.body.classList.toggle("alert",on);
+  if(on){
+    elVerdict.textContent="Signal pulsatile";
+    const period=lastBpm?60000/lastBpm:800;
+    if(performance.now()-lastBeat>period*0.8){ lastBeat=performance.now(); flash(); }
+  }else if(running){
+    elVerdict.textContent="À l'écoute";
+    elBpm.innerHTML='--<small>battements / min</small>';
+    elPulse.classList.remove("beat");
+  }
+}
+function flash(){
+  elPulse.classList.add("beat");
+  setTimeout(()=>elPulse.classList.remove("beat"),140);
+  if(navigator.vibrate) navigator.vibrate(60);
+  if(beepOn && audioCtx) beep();
+}
+function beep(){
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain(), t=audioCtx.currentTime;
+  o.frequency.value=3300;                    // hors bande analysée
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(0.25,t+0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001,t+0.075);
+  o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t+0.09);
+}
+
+/* ---------- Courbe ---------- */
+function draw(){
+  const W=cv.width, H=cv.height, css=getComputedStyle(document.documentElement);
+  ctx2d.clearRect(0,0,W,H);
+  ctx2d.fillStyle=css.getPropertyValue("--panel").trim(); ctx2d.fillRect(0,0,W,H);
+  if(samples.length<4) return;
+  const tEnd=samples[samples.length-1].t, tStart=tEnd-WIN_S;
+  const vis=samples.filter(s=>s.t>=tStart);
+  if(vis.length<4) return;
+  let mn=Infinity,mx=-Infinity;
+  for(const s of vis){ if(s.v<mn)mn=s.v; if(s.v>mx)mx=s.v; }
+  const span=Math.max(6,mx-mn);
+  ctx2d.strokeStyle=css.getPropertyValue("--line").trim(); ctx2d.lineWidth=1;
+  for(let k=1;k<4;k++){ const y=H*k/4; ctx2d.beginPath(); ctx2d.moveTo(0,y); ctx2d.lineTo(W,y); ctx2d.stroke(); }
+  ctx2d.lineWidth=3; ctx2d.lineJoin="round";
+  ctx2d.strokeStyle=(performance.now()<alertUntil?css.getPropertyValue("--signal"):css.getPropertyValue("--muted")).trim();
+  ctx2d.beginPath();
+  vis.forEach((s,i)=>{
+    const x=W*(s.t-tStart)/WIN_S, y=H-8-(H-16)*((s.v-mn)/span);
+    i?ctx2d.lineTo(x,y):ctx2d.moveTo(x,y);
+  });
+  ctx2d.stroke();
+}
+
+/* ---------- Commandes ---------- */
+elStart.addEventListener("click",()=>{ running?stop():start(); });
+elSound.addEventListener("click",()=>{
+  beepOn=!beepOn;
+  elSound.setAttribute("aria-pressed",String(beepOn));
+  elSound.textContent="Bip : "+(beepOn?"oui":"non");
+});
+elSens.addEventListener("input",()=>{
+  const p=elSens.value/100;
+  scoreTh=0.45-0.20*p;      // 0.45 (prudent) -> 0.25 (sensible)
+  depthTh=2.0-1.1*p;        // 2.0 dB -> 0.9 dB
+});
+elBand.addEventListener("change",()=>{ band=elBand.value.split(",").map(Number); });
+elSens.dispatchEvent(new Event("input"));
+})();
+</script>
+</body>
+</html>
